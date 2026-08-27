@@ -29,6 +29,47 @@ Open <http://localhost:3000>.
 | `pnpm lint`      | ESLint                           |
 | `pnpm typecheck` | `tsc --noEmit`                   |
 
+## CI/CD
+
+GitHub Actions runs linting, TypeScript checks, a production dependency audit, a Trivy filesystem scan, and a production build for pull requests targeting `dev`, `staging`, or `main`.
+
+Pushes to those branches run the same checks and deploy the built Next.js app to the matching VPS environment through SSH and PM2. The deploy job also checks `/api/health` after restarting the app.
+
+### GitHub Environment setup
+
+Create GitHub Environments named `dev`, `staging`, and `main`. Add these Variables to each environment:
+
+| Variable                       | Purpose                        |
+| ------------------------------ | ------------------------------ |
+| `NEXT_PUBLIC_APP_URL`          | Public URL for the environment |
+| `NEXT_PUBLIC_APP_NAME`         | Application name               |
+| `NEXT_PUBLIC_API_URL`          | Backend API URL                |
+| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | Google OAuth client ID         |
+
+Add the matching dotenv Secret (`DEV_ENV_FILE` in `dev`, `STAGING_ENV_FILE` in
+`staging`, or `PRODUCTION_ENV_FILE` in `main`) and the following Secrets to
+each environment:
+
+| Secret                                                      | Purpose                                             |
+| ----------------------------------------------------------- | --------------------------------------------------- |
+| `DEV_ENV_FILE` / `STAGING_ENV_FILE` / `PRODUCTION_ENV_FILE` | Complete dotenv content for the matching deployment |
+| `AUTH_SECRET`                                               | NextAuth secret                                     |
+| `AUTH_GOOGLE_ID`                                            | Google OAuth client ID, if used server-side         |
+| `AUTH_GOOGLE_SECRET`                                        | Google OAuth client secret, if used                 |
+| `AUTH_URL`                                                  | Auth callback URL, if required by the deployment    |
+| `SSH_KEY`                                                   | Private key for the deployment user                 |
+| `SSH_HOST`                                                  | VPS hostname or IP address                          |
+| `SSH_USER`                                                  | VPS deployment username                             |
+| `SSH_KNOWN_HOSTS`                                           | Pinned host-key output for `SSH_HOST`               |
+
+`SSH_KNOWN_HOSTS` should contain the output of `ssh-keyscan -H <host>` captured from a trusted machine. The deployment user’s server must have Node.js 20, pnpm 9, PM2, rsync, and curl installed. Deployments use these remote paths and PM2 processes:
+
+| Branch    | Remote path                         | PM2 process              | Port   |
+| --------- | ----------------------------------- | ------------------------ | ------ |
+| `dev`     | `~/skillbridge/frontend/dev`        | `skillbridge-ui-dev`     | `3000` |
+| `staging` | `~/skillbridge/frontend/staging`    | `skillbridge-ui-staging` | `4000` |
+| `main`    | `~/skillbridge/frontend/production` | `skillbridge-ui-prod`    | `5000` |
+
 ## Environment variables
 
 Schemas live in [`src/env/`](./src/env), split by side:

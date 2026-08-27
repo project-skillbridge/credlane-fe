@@ -3,10 +3,14 @@ name: UI CD
 on:
   push:
     branches: [dev, staging, main]
+  workflow_dispatch:
 
 concurrency:
   group: ui-cd-${{ github.ref_name }}
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   NODE_VERSION: "20"
@@ -21,58 +25,93 @@ jobs:
   deploy:
     name: Deploy to ${{ github.ref_name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: ci
     environment: ${{ github.ref_name }}
     steps:
       - name: Set deploy target
         id: target
+        shell: bash
+        env:
+          DEPLOY_BRANCH: ${{ github.ref_name }}
         run: |
-          if [ "${{ github.ref_name }}" = "dev" ]; then
-            echo "dir=dev" >> "$GITHUB_OUTPUT"
-            echo "app=skillbridge-ui-dev" >> "$GITHUB_OUTPUT"
-            echo "port=3000" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.ref_name }}" = "staging" ]; then
-            echo "dir=staging" >> "$GITHUB_OUTPUT"
-            echo "app=skillbridge-ui-staging" >> "$GITHUB_OUTPUT"
-            echo "port=4000" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.ref_name }}" = "main" ]; then
-            echo "dir=production" >> "$GITHUB_OUTPUT"
-            echo "app=skillbridge-ui-prod" >> "$GITHUB_OUTPUT"
-            echo "port=5000" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Unknown branch '${{ github.ref_name }}' — expected 'dev', 'staging', or 'main'"
-            exit 1
-          fi
+          case "$DEPLOY_BRANCH" in
+            dev)
+              echo "dir=dev" >> "$GITHUB_OUTPUT"
+              echo "app=skillbridge-ui-dev" >> "$GITHUB_OUTPUT"
+              echo "port=3000" >> "$GITHUB_OUTPUT"
+              ;;
+            staging)
+              echo "dir=staging" >> "$GITHUB_OUTPUT"
+              echo "app=skillbridge-ui-staging" >> "$GITHUB_OUTPUT"
+              echo "port=4000" >> "$GITHUB_OUTPUT"
+              ;;
+            main)
+              echo "dir=production" >> "$GITHUB_OUTPUT"
+              echo "app=skillbridge-ui-prod" >> "$GITHUB_OUTPUT"
+              echo "port=5000" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unknown branch '$DEPLOY_BRANCH' — expected 'dev', 'staging', or 'main'"
+              exit 1
+              ;;
+          esac
 
       - name: Validate environment file secret
+        shell: bash
         env:
+          DEPLOY_BRANCH: ${{ github.ref_name }}
           DEV_ENV_FILE: ${{ secrets.DEV_ENV_FILE }}
           STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
           PRODUCTION_ENV_FILE: ${{ secrets.PRODUCTION_ENV_FILE }}
         run: |
-          BRANCH="${{ github.ref_name }}"
-          if [ "$BRANCH" = "dev" ]; then
-            ENV_FILE="$DEV_ENV_FILE"
-            SECRET_NAME="DEV_ENV_FILE"
-          elif [ "$BRANCH" = "staging" ]; then
-            ENV_FILE="$STAGING_ENV_FILE"
-            SECRET_NAME="STAGING_ENV_FILE"
-          elif [ "$BRANCH" = "main" ]; then
-            ENV_FILE="$PRODUCTION_ENV_FILE"
-            SECRET_NAME="PRODUCTION_ENV_FILE"
-          fi
-          if [ -z "$ENV_FILE" ]; then
-            echo "::error::$SECRET_NAME secret is empty or unset. Add it under Settings → Environments → $BRANCH → Secrets → $SECRET_NAME."
+          set -euo pipefail
+
+          case "$DEPLOY_BRANCH" in
+            dev)
+              ENV_FILE="${DEV_ENV_FILE:-}"
+              SECRET_NAME="DEV_ENV_FILE"
+              ;;
+            staging)
+              ENV_FILE="${STAGING_ENV_FILE:-}"
+              SECRET_NAME="STAGING_ENV_FILE"
+              ;;
+            main)
+              ENV_FILE="${PRODUCTION_ENV_FILE:-}"
+              SECRET_NAME="PRODUCTION_ENV_FILE"
+              ;;
+          esac
+
+          if [[ -z "$ENV_FILE" ]]; then
+            echo "::error::$SECRET_NAME is empty or unset in the '$DEPLOY_BRANCH' GitHub Environment."
             exit 1
           fi
-          echo "$SECRET_NAME is set"
+
           {
             echo "DOTENV<<__SB_UI_DOTENV__"
-            echo "$ENV_FILE"
+            printf '%s\n' "$ENV_FILE"
             echo "__SB_UI_DOTENV__"
           } >> "$GITHUB_ENV"
 
-      # ── Build on runner ──────────────────────────────────────────────────────
+      - name: Validate deployment credentials
+        shell: bash
+        env:
+          DEPLOY_BRANCH: ${{ github.ref_name }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+        run: |
+          set -euo pipefail
+
+          for secret_name in SSH_KEY SSH_HOST SSH_USER SSH_KNOWN_HOSTS AUTH_SECRET; do
+            if [[ -z "${!secret_name:-}" ]]; then
+              echo "::error::$secret_name is empty or unset in the '$DEPLOY_BRANCH' GitHub Environment."
+              exit 1
+            fi
+          done
+
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -85,7 +124,8 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'pnpm'
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -93,8 +133,7 @@ jobs:
           HUSKY: 0
 
       - name: Build
-        # NEXT_PUBLIC_* vars are baked in at build time; pass them from
-        # the GitHub environment variables so they match what CI validates.
+        # NEXT_PUBLIC_* values are baked into the Next.js output at build time.
         env:
           NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
           NEXT_PUBLIC_APP_NAME: ${{ vars.NEXT_PUBLIC_APP_NAME }}
@@ -106,29 +145,33 @@ jobs:
           AUTH_URL: ${{ secrets.AUTH_URL }}
         run: pnpm build
 
-      # ── Transfer artifacts to server ─────────────────────────────────────────
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_KEY }}
 
-      - name: Add server to known hosts
-        run: ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+      - name: Configure pinned SSH host keys
+        shell: bash
+        env:
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
 
       - name: Sync build to server
+        shell: bash
         env:
           REMOTE: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
           DEST: ~/skillbridge/frontend/${{ steps.target.outputs.dir }}
         run: |
+          set -euo pipefail
           ssh "$REMOTE" "mkdir -p ${DEST}"
-          # compiled Next.js output
           rsync -az --delete .next/ "${REMOTE}:${DEST}/.next/"
-          # static assets
           rsync -az --delete public/ "${REMOTE}:${DEST}/public/"
-          # package manifest and Next.js config (needed for next start)
           rsync -az package.json pnpm-lock.yaml next.config.ts "${REMOTE}:${DEST}/"
 
-      # ── Server-side: install runtime deps and restart ─────────────────────────
       - name: Install and restart on server
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
@@ -150,7 +193,7 @@ jobs:
             printf '%s\n' "$DOTENV" > .env
             chmod 600 .env
 
-            pnpm install --frozen-lockfile
+            HUSKY=0 pnpm install --frozen-lockfile
 
             if pm2 describe "$APP_NAME" > /dev/null 2>&1; then
               pm2 reload "$APP_NAME" --update-env
@@ -158,3 +201,15 @@ jobs:
               pm2 start node_modules/next/dist/bin/next --name "$APP_NAME" -- start -p "$PORT"
             fi
             pm2 save
+
+            for attempt in 1 2 3 4 5; do
+              if curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:${PORT}/api/health" > /dev/null; then
+                echo "Health check passed on attempt $attempt"
+                exit 0
+              fi
+              sleep 2
+            done
+
+            echo "Health check failed for $APP_NAME on port $PORT"
+            pm2 logs "$APP_NAME" --lines 50 --nostream || true
+            exit 1
