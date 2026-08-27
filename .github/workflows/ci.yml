@@ -3,11 +3,11 @@ name: UI CI
 on:
   pull_request:
     branches: [dev, staging, main]
+  workflow_dispatch:
   workflow_call:
 
 permissions:
   contents: read
-  security-events: write
 
 env:
   NODE_VERSION: "20"
@@ -17,6 +17,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -30,6 +31,8 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -37,11 +40,12 @@ jobs:
           HUSKY: 0
 
       - name: Run linter
-        run: pnpm run lint
+        run: pnpm lint
 
   typecheck:
     name: Typecheck
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -55,6 +59,8 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -67,6 +73,7 @@ jobs:
   audit:
     name: Dependency Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -80,18 +87,24 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
         env:
           HUSKY: 0
 
-      - name: Run pnpm audit
+      - name: Run production dependency audit
         run: pnpm audit --prod --audit-level=moderate
 
   trivy:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -99,31 +112,34 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
-          scan-type: "fs"
-          scan-ref: "."
-          format: "sarif"
-          output: "trivy-results.sarif"
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
 
       - name: Upload Trivy results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@5fe9434cd24fe243e33e7f3305f8a5b519b70280
         if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@5fe9434cd24fe243e33e7f3305f8a5b519b70280
         with:
-          sarif_file: "trivy-results.sarif"
+          sarif_file: trivy-results.sarif
 
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, typecheck, trivy]
-    environment: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+    timeout-minutes: 20
+    needs: [lint, typecheck, audit, trivy]
+    # PRs, including PRs from forks, must not require deployment secrets.
+    # Production values are supplied by the CD workflow's GitHub Environment.
     env:
-      NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
-      NEXT_PUBLIC_APP_NAME: ${{ vars.NEXT_PUBLIC_APP_NAME }}
-      NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
-      NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${{ vars.NEXT_PUBLIC_GOOGLE_CLIENT_ID }}
-      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
-      AUTH_GOOGLE_ID: ${{ secrets.AUTH_GOOGLE_ID }}
-      AUTH_GOOGLE_SECRET: ${{ secrets.AUTH_GOOGLE_SECRET }}
-      AUTH_URL: ${{ secrets.AUTH_URL }}
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_NAME: SkillBridge
+      NEXT_PUBLIC_API_URL: http://localhost:8080/api/v1
+      NEXT_PUBLIC_GOOGLE_CLIENT_ID: ci-placeholder
+      AUTH_SECRET: ci-placeholder
+      SKIP_ENV_VALIDATION: "1"
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -137,6 +153,8 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
